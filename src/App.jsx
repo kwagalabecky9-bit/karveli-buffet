@@ -800,7 +800,7 @@ const ItemsTab = memo(function ItemsTab({ items, setItems, showToast }) {
 });
 
 // ─── RECIPES TAB ─────────────────────────────────────────────────────────────
-const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMap, allCosted, showToast }) {
+const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMap, allCosted, showToast, dbReady }) {
   const [filterCat, setFilterCat] = useState("All");
   const [search, setSearch]       = useState("");
   const [showForm, setShowForm]   = useState(false);
@@ -815,8 +815,8 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
     [recipes, filterCat, search]
   );
 
-  const openNew  = () => { setForm({id:uid(),name:"",category:"Proteins",basePax:10,yieldPct:100,tags:[],lines:[]}); setEditing(null); setShowForm(true); };
-  const openEdit = (r) => { setForm(JSON.parse(JSON.stringify(r))); setEditing(r); setShowForm(true); };
+  const openNew  = () => { setForm({id:uid(),name:"",category:"Proteins",basePax:10,yieldPct:100,tags:[],lines:[]}); setEditing(null); setShowForm(true); window.scrollTo({top:0,behavior:"smooth"}); };
+  const openEdit = (r) => { setForm(JSON.parse(JSON.stringify(r))); setEditing(r); setShowForm(true); window.scrollTo({top:0,behavior:"smooth"}); };
 
   const formCost = useMemo(() => {
     if (!form) return { batchCost:0, costPerPax:0, lines:[] };
