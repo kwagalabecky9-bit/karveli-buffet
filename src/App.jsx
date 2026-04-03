@@ -7,10 +7,10 @@ const fmtN = (n, dp=2) => (isNaN(n)||n==null) ? "0" : Number(n).toFixed(dp);
 const fmt = (n) => "UGX " + Math.round(n||0).toLocaleString();
 const uid = () => Math.random().toString(36).slice(2,9);
 const todayStr = () => new Date().toLocaleDateString("en-UG",{year:"numeric",month:"long",day:"numeric"});
-const DISH_CATS = ["Starches","Proteins","Sauces","Sides","Salads","Desserts","Drinks","Other"];
+const DISH_CATS = ["Starches","Proteins","Sauces","Sides","Salads","Desserts","Breakfast","Eggs & Omelettes","Pastries & Breads","Beverages","Accompaniments","Other"];
 const DIET_TAGS = ["veg","vegan","gluten-free","dairy-free","contains-nuts","halal"];
 const BRANCHES  = ["Lumumba Avenue","Munyonyo","Bukoto To Go","Gaba Road","All Branches"];
-const TABS = [{id:"items",label:"📦 Prices"},{id:"recipes",label:"🧑‍🍳 Recipes"},{id:"menu",label:"🍽️ Menu Builder"},{id:"saved",label:"💾 Saved"},{id:"issue",label:"📋 Issue Sheet"},{id:"records",label:"📜 Records"}];
+const TABS = [{id:"items",label:"📦 Prices"},{id:"recipes",label:"🧑‍🍳 Recipes"},{id:"packages",label:"📋 Packages"},{id:"menu",label:"🍽️ Menu Builder"},{id:"saved",label:"💾 Saved"},{id:"issue",label:"🧾 Issue Sheet"},{id:"records",label:"📜 Records"}];
 
 // ─── SEED DATA (computed once at module level) ────────────────────────────────
 const SEED_ITEMS = [
@@ -415,6 +415,7 @@ export default function KarveliApp() {
   const [dbReady, setDbReady]       = useState(false);
   const [loading, setLoading]       = useState(true);
   const [selIds, setSelIds]         = useState(new Set());
+  const [uptake, setUptake]         = useState({});  // recipeId → 0-100%
   const [pax, setPax]               = useState(50);
   const [fcPct, setFcPct]           = useState(35);
   const [vatPct, setVatPct]         = useState(18);
@@ -424,6 +425,7 @@ export default function KarveliApp() {
   const [eventDate, setEventDate]   = useState("");
   const [branch, setBranch]         = useState(BRANCHES[0]);
   const [savedMenus, setSavedMenus] = useState([]);
+  const [packages, setPackages]     = useState([]);
   const [issueRecs, setIssueRecs]   = useState([]);
   const [issueNote, setIssueNote]   = useState("");
   const [modal, setModal]           = useState(null);
@@ -464,6 +466,11 @@ export default function KarveliApp() {
           .from("menus").select("*").order("created_at", { ascending: false });
         if (menuErr) throw menuErr;
         if (menuRows?.length) setSavedMenus(menuRows.map(dbToMenu));
+
+        // Load packages
+        const { data: pkgRows } = await supabase
+          .from("packages").select("*").order("created_at", { ascending: false });
+        if (pkgRows?.length) setPackages(pkgRows);
 
         // Load issue records
         const { data: recordRows, error: recordErr } = await supabase
@@ -515,13 +522,14 @@ export default function KarveliApp() {
     return { rawCPP, prodCPP, totalCPP, suggestedPP, finalPP, totalCostAll, sellingExVat, vatAmt, sellingIncVat, actualFcPct, margin };
   }, [selRecipes, allCosted, pax, fcPct, vatPct, customPP]);
 
-  // ── Issue list ──
+  // ── Issue list — applies uptake % to scale quantities ──
   const issueList = useMemo(() => {
     const map = {};
     selRecipes.forEach(r => {
       const c = allCosted[r.id];
       if (!c) return;
-      const scale = pax / r.basePax;
+      const uptakePct = (uptake[r.id] ?? 100) / 100;
+      const scale = (pax / r.basePax) * uptakePct;
       c.lines.forEach(line => {
         const unit = line.qtyUnit || line.uom || "";
         const key  = `${line.item}||${unit}`;
@@ -533,7 +541,7 @@ export default function KarveliApp() {
       });
     });
     return Object.values(map).sort((a,b) => a.name.localeCompare(b.name));
-  }, [selRecipes, allCosted, pax]);
+  }, [selRecipes, allCosted, pax, uptake]);
 
   const showToast = useCallback((msg, type="ok") => {
     setToast({msg,type}); setTimeout(()=>setToast(null), 3000);
@@ -570,6 +578,26 @@ export default function KarveliApp() {
     showToast("Menu deleted");
   }, [dbReady, showToast]);
 
+  const savePackage = useCallback(async ({ name, description, type, recipeIds, targetPP }) => {
+    const payload = { name, description, type, recipe_ids: recipeIds, target_pp: targetPP||null };
+    if (dbReady) {
+      const { data, error } = await supabase.from("packages").insert(payload).select().single();
+      if (error) { showToast("Save failed","err"); console.error(error); return; }
+      setPackages(prev => [data, ...prev]);
+    } else {
+      setPackages(prev => [{ id:uid(), ...payload, created_at: new Date().toISOString() }, ...prev]);
+    }
+    showToast(`Package "${name}" saved!`);
+  }, [dbReady, showToast]);
+
+  const deletePackage = useCallback(async (id) => {
+    if (dbReady) {
+      await supabase.from("packages").delete().eq("id", id);
+    }
+    setPackages(prev => prev.filter(p => p.id !== id));
+    showToast("Package deleted");
+  }, [dbReady, showToast]);
+
   const logIssue = useCallback(async () => {
     if (!selIds.size) { showToast("No dishes selected","err"); return; }
     const list = issueList.map(i=>({name:i.name,qtyUnit:i.qtyUnit,epQty:+fmtN(i.epQty,1),apQty:+fmtN(i.apQty,1),cost:Math.round(i.lineCost)}));
@@ -593,22 +621,119 @@ export default function KarveliApp() {
     setIssueNote(""); showToast("Issue logged!");
   }, [selIds,menuName,clientName,eventDate,branch,pax,selRecipes,pricing,issueNote,issueList,dbReady,showToast]);
 
-  const generateQuote = useCallback(async (mode) => {
+  const generateQuote = useCallback((mode) => {
     setModal(null);
-    const payload = { mode, menuName:menuName||"Buffet Menu", clientName:clientName||"Valued Client",
-      eventDate, branch, pax, dishes:selRecipes.map(r=>({name:r.name,category:r.category,tags:r.tags,costPP:allCosted[r.id]?.costPerPax||0})),
-      pricing:{ rawCPP:pricing.rawCPP, totalCPP:pricing.totalCPP, suggestedPP:pricing.suggestedPP, finalPP:pricing.finalPP, sellingExVat:pricing.sellingExVat, vatAmt:pricing.vatAmt, sellingIncVat:pricing.sellingIncVat, vatPct, fcPct:pricing.actualFcPct, margin:pricing.margin },
-      issueList: mode==="internal" ? issueList.map(i=>({name:i.name,qtyUnit:i.qtyUnit,epQty:fmtN(i.epQty,1),apQty:fmtN(i.apQty,1),cost:Math.round(i.lineCost)})) : [],
-      totalExpenditure: mode==="internal" ? pricing.totalCostAll : 0, generatedAt:todayStr() };
-    try {
-      const res = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,
-          system:`Generate a complete self-contained HTML buffet quote for Karveli restaurant group (Uganda). Colours: maroon #6B1A1A, gold #C4922A, cream #F5E6C8. Currency: UGX. Return ONLY valid HTML, no markdown. Make it print-ready. ${mode==="client"?"CLIENT: Show menu items by category, ${pax} guests, final price ${fmt(pricing.finalPP)}/pax, total inc VAT. NO costs, margins, or quantities visible.":"INTERNAL: Show full cost breakdown per dish, raw cost, 10% production, food cost %, suggested vs final price, gross margin, complete ingredient issue list with recipe qty, effective qty after yield, and estimated cost per line. Add approved-by signature field."}`,
-          messages:[{role:"user",content:JSON.stringify(payload)}]})});
-      const data = await res.json();
-      const html = data.content?.find(b=>b.type==="text")?.text || "<p>Generation failed</p>";
-      const w = window.open("","_blank"); w.document.write(html); w.document.close(); setTimeout(()=>w.print(),800);
-    } catch(e) { showToast("Quote failed — check connection","err"); }
+    const isClient = mode === "client";
+    const fmtUGX = (n) => "UGX " + Math.round(n||0).toLocaleString();
+    const byCategory = {};
+    selRecipes.forEach(r => {
+      if (!byCategory[r.category]) byCategory[r.category] = [];
+      byCategory[r.category].push(r);
+    });
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Karveli ${isClient?"Client Quote":"Internal Sheet"}</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: Georgia, serif; color: #2A1A0E; background: white; }
+  .page { max-width: 800px; margin: 0 auto; padding: 40px; }
+  .header { background: #6B1A1A; color: #F5E6C8; padding: 28px 32px; margin-bottom: 28px; }
+  .header h1 { font-size: 24px; letter-spacing: 2px; margin-bottom: 4px; }
+  .header .sub { font-size: 11px; letter-spacing: 3px; color: #C4922A; text-transform: uppercase; }
+  .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .meta-box { background: #FBF7F0; border: 1px solid #E8D9C0; padding: 14px 18px; border-radius: 8px; }
+  .meta-box label { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: #8B6B4A; display: block; margin-bottom: 3px; }
+  .meta-box span { font-size: 15px; font-weight: bold; color: #3D0E0E; }
+  .section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 2px; color: #8B6B4A; margin: 22px 0 8px; border-bottom: 1px solid #E8D9C0; padding-bottom: 5px; }
+  .dish-row { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px dotted #E8D9C0; font-size: 13px; }
+  .dish-name { color: #3D0E0E; }
+  .dish-serving { color: #8B6B4A; font-size: 11px; margin-left: 8px; }
+  .pricing-box { background: linear-gradient(135deg, #6B1A1A, #3D0E0E); color: #F5E6C8; padding: 22px 28px; border-radius: 10px; margin: 24px 0; }
+  .pricing-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; color: #D4B080; }
+  .pricing-row.total { border-top: 1px solid #C4922A; margin-top: 10px; padding-top: 10px; }
+  .pricing-row.total span:first-child { color: #F5E6C8; font-size: 14px; }
+  .pricing-row.total span:last-child { color: #C4922A; font-size: 22px; font-weight: bold; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  th { background: #6B1A1A; color: #F5E6C8; padding: 8px 10px; text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 7px 10px; border-bottom: 1px solid #F0E8D8; }
+  tr:nth-child(even) td { background: #FBF7F0; }
+  .sig { margin-top: 40px; display: grid; grid-template-columns: 1fr 1fr; gap: 40px; }
+  .sig-line { border-top: 1px solid #2A1A0E; padding-top: 6px; font-size: 11px; color: #8B6B4A; }
+  .footer { text-align: center; margin-top: 32px; font-size: 10px; color: #8B6B4A; letter-spacing: 1px; }
+  .tag { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 9px; background: #E8F5E9; color: #4A7C59; margin-left: 4px; }
+  @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+</style></head><body><div class="page">
+<div class="header">
+  <div class="sub">Karveli Restaurant Group · Uganda</div>
+  <h1>${isClient ? "BUFFET QUOTATION" : "INTERNAL COSTING SHEET"}</h1>
+  <div style="margin-top:8px;font-size:12px;color:#D4B080">${menuName||"Buffet Menu"} ${clientName ? `· ${clientName}` : ""}</div>
+</div>
+<div class="meta">
+  <div class="meta-box"><label>Event Date</label><span>${eventDate||"TBC"}</span></div>
+  <div class="meta-box"><label>Branch</label><span>${branch}</span></div>
+  <div class="meta-box"><label>Number of Guests</label><span>${pax} people</span></div>
+  <div class="meta-box"><label>Generated</label><span>${todayStr()}</span></div>
+</div>
+
+<div class="section-title">Menu Selection — ${selRecipes.length} dishes</div>
+${Object.entries(byCategory).map(([cat, dishes]) => `
+  <div style="margin-bottom:14px">
+    <div style="font-size:10px;font-weight:bold;color:#8B6B4A;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">${cat}</div>
+    ${dishes.map(r => {
+      const cpp = allCosted[r.id]?.costPerPax||0;
+      return `<div class="dish-row">
+        <div><span class="dish-name">${r.name}</span>${r.servingG?`<span class="dish-serving">${r.servingG}g/person</span>`:""}${(r.tags||[]).map(t=>`<span class="tag">${t}</span>`).join("")}</div>
+        ${isClient ? "" : `<div style="color:#6B1A1A;font-weight:bold">${fmtUGX(cpp)}/pax</div>`}
+      </div>`;
+    }).join("")}
+  </div>
+`).join("")}
+
+<div class="pricing-box">
+  ${isClient ? `
+    <div class="pricing-row"><span>Price per person (inc. 10% production)</span><span>${fmtUGX(pricing.finalPP)}</span></div>
+    <div class="pricing-row"><span>VAT (${vatPct}%)</span><span>${fmtUGX(pricing.vatAmt/pax)}/pax</span></div>
+    <div class="pricing-row total"><span>TOTAL FOR ${pax} GUESTS</span><span>${fmtUGX(pricing.sellingIncVat)}</span></div>
+  ` : `
+    <div class="pricing-row"><span>Raw food cost/person</span><span>${fmtUGX(pricing.rawCPP)}</span></div>
+    <div class="pricing-row"><span>+ 10% production</span><span>${fmtUGX(pricing.prodCPP)}</span></div>
+    <div class="pricing-row"><span>Total cost/person</span><span>${fmtUGX(pricing.totalCPP)}</span></div>
+    <div class="pricing-row"><span>Selling price/person</span><span>${fmtUGX(pricing.finalPP)}</span></div>
+    <div class="pricing-row total"><span>TOTAL SELLING (${pax} guests + VAT)</span><span>${fmtUGX(pricing.sellingIncVat)}</span></div>
+    <div class="pricing-row" style="margin-top:6px"><span>Gross Margin</span><span style="color:#7BC67E">${fmtUGX(pricing.margin)}</span></div>
+    <div class="pricing-row"><span>Food Cost %</span><span style="color:${pricing.actualFcPct<=35?"#7BC67E":"#FF8A80"}">${pricing.actualFcPct.toFixed(1)}%</span></div>
+  `}
+</div>
+
+${!isClient ? `
+<div class="section-title">Ingredient Issue List — ${pax} guests</div>
+<table>
+  <thead><tr><th>#</th><th>Ingredient</th><th>Unit</th><th>EP (usable)</th><th>AP (to issue)</th><th>Est. Cost</th></tr></thead>
+  <tbody>
+    ${issueList.map((ing,i) => `<tr>
+      <td>${i+1}</td>
+      <td>${ing.name}</td>
+      <td>${ing.qtyUnit}</td>
+      <td style="color:#4A7C59">${fmtN(ing.epQty,2)} ${ing.qtyUnit}</td>
+      <td style="font-weight:bold;color:#5C3A1E">${fmtN(ing.apQty,2)} ${ing.qtyUnit}</td>
+      <td>${fmtUGX(ing.lineCost)}</td>
+    </tr>`).join("")}
+    <tr style="background:#FFF5E6"><td colspan="5" style="font-weight:bold;color:#6B1A1A">TOTAL EXPENDITURE</td><td style="font-weight:bold;color:#6B1A1A">${fmtUGX(pricing.totalCostAll)}</td></tr>
+  </tbody>
+</table>
+<div class="sig">
+  <div><div class="sig-line">Prepared by: ___________________________</div></div>
+  <div><div class="sig-line">Approved by: ___________________________</div></div>
+</div>
+` : `
+<div class="footer">Thank you for choosing Karveli · info@karvelifood.com</div>
+`}
+</div><script>window.onload=()=>setTimeout(()=>window.print(),500)</script>
+</body></html>`;
+
+    const w = window.open("","_blank");
+    if (w) { w.document.write(html); w.document.close(); }
+    else showToast("Allow popups for this site to open quotes","err");
   }, [menuName,clientName,eventDate,branch,pax,selRecipes,allCosted,pricing,vatPct,issueList,showToast]);
 
   return (
@@ -658,9 +783,14 @@ export default function KarveliApp() {
       </div>
 
       {/* Tab content */}
-      {tab==="items"   && <ItemsTab   items={items} setItems={setItems} showToast={showToast} dbReady={dbReady} />}
-      {tab==="recipes" && <RecipesTab recipes={recipes} setRecipes={setRecipes} items={items} itemMap={itemMap} allCosted={allCosted} showToast={showToast} dbReady={dbReady} />}
-      {tab==="menu"    && <MenuTab    recipes={recipes} allCosted={allCosted} selIds={selIds} toggleSel={toggleSel} pax={pax} setPax={setPax} fcPct={fcPct} setFcPct={setFcPct} vatPct={vatPct} setVatPct={setVatPct} customPP={customPP} setCustomPP={setCustomPP} clientName={clientName} setClientName={setClientName} eventDate={eventDate} setEventDate={setEventDate} branch={branch} setBranch={setBranch} pricing={pricing} selRecipes={selRecipes} />}
+      {tab==="items"    && <ItemsTab   items={items} setItems={setItems} showToast={showToast} dbReady={dbReady} />}
+      {tab==="recipes"  && <RecipesTab recipes={recipes} setRecipes={setRecipes} items={items} itemMap={itemMap} allCosted={allCosted} showToast={showToast} dbReady={dbReady} />}
+      {tab==="packages" && <PackagesTab packages={packages} recipes={recipes} allCosted={allCosted} onSave={savePackage} onDelete={deletePackage} onLoad={(pkg) => {
+          setSelIds(new Set(pkg.recipe_ids||[]));
+          setMenuName(pkg.name); setTab("menu");
+          showToast(`"${pkg.name}" loaded into Menu Builder!`);
+        }} />}
+      {tab==="menu"    && <MenuTab    recipes={recipes} allCosted={allCosted} selIds={selIds} toggleSel={toggleSel} uptake={uptake} setUptake={setUptake} pax={pax} setPax={setPax} fcPct={fcPct} setFcPct={setFcPct} vatPct={vatPct} setVatPct={setVatPct} customPP={customPP} setCustomPP={setCustomPP} clientName={clientName} setClientName={setClientName} eventDate={eventDate} setEventDate={setEventDate} branch={branch} setBranch={setBranch} pricing={pricing} selRecipes={selRecipes} />}
       {tab==="saved"   && <SavedTab   savedMenus={savedMenus} onDelete={deleteMenu} onLoad={(m)=>{
           const ids = m.recipeIds || m.selectedIds || [];
           setSelIds(new Set(ids));
@@ -1113,7 +1243,7 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
 });
 
 // ─── MENU TAB ─────────────────────────────────────────────────────────────────
-const MenuTab = memo(function MenuTab({ recipes, allCosted, selIds, toggleSel, pax, setPax, fcPct, setFcPct, vatPct, setVatPct, customPP, setCustomPP, clientName, setClientName, eventDate, setEventDate, branch, setBranch, pricing, selRecipes }) {
+const MenuTab = memo(function MenuTab({ recipes, allCosted, selIds, toggleSel, uptake, setUptake, pax, setPax, fcPct, setFcPct, vatPct, setVatPct, customPP, setCustomPP, clientName, setClientName, eventDate, setEventDate, branch, setBranch, pricing, selRecipes }) {
   const [filterCat, setFilterCat] = useState("All");
   const [search, setSearch]       = useState("");
 
@@ -1185,13 +1315,25 @@ const MenuTab = memo(function MenuTab({ recipes, allCosted, selIds, toggleSel, p
         {selIds.size>0 ? (
           <>
             <div style={{background:"white",borderRadius:10,border:`1.5px solid ${B.border}`,padding:"13px 15px",marginBottom:12}}>
-              <div style={{fontSize:10,fontWeight:700,letterSpacing:3,color:B.muted,marginBottom:7,textTransform:"uppercase"}}>Menu Selection</div>
-              {selRecipes.map(r=>(
-                <div key={r.id} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:`1px dotted ${B.border}`}}>
-                  <span style={{fontSize:12}}>{r.name}</span>
-                  <span style={{fontSize:12,fontWeight:600}}>{fmt(allCosted[r.id]?.costPerPax||0)}<span style={{fontWeight:400,fontSize:10,color:B.muted}}>/pax</span></span>
-                </div>
-              ))}
+              <div style={{fontSize:10,fontWeight:700,letterSpacing:3,color:B.muted,marginBottom:7,textTransform:"uppercase"}}>Menu Selection — Uptake %</div>
+              <div style={{fontSize:10,color:B.muted,marginBottom:8,fontStyle:"italic"}}>Slide to set what % of guests will take each dish. Affects issue quantities, not cost/person.</div>
+              {selRecipes.map(r=>{
+                const u = uptake[r.id] ?? 100;
+                return (
+                  <div key={r.id} style={{marginBottom:8,borderBottom:`1px dotted ${B.border}`,paddingBottom:8}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                      <span style={{fontSize:12,fontWeight:600}}>{r.name}</span>
+                      <div style={{display:"flex",alignItems:"center",gap:6}}>
+                        <span style={{fontSize:11,color:u<80?"#C0392B":B.green,fontWeight:700}}>{u}%</span>
+                        <span style={{fontSize:11,color:B.muted}}>{fmt(allCosted[r.id]?.costPerPax||0)}/pax</span>
+                      </div>
+                    </div>
+                    <input type="range" min={10} max={100} step={5} value={u}
+                      onChange={e=>setUptake(prev=>({...prev,[r.id]:Number(e.target.value)}))}
+                      style={{width:"100%",accentColor:u<80?"#C0392B":B.maroon}}/>
+                  </div>
+                );
+              })}
               <div style={{display:"flex",justifyContent:"space-between",paddingTop:7,marginTop:4}}>
                 <span style={{fontWeight:700,color:B.maroon,fontSize:13}}>Raw Food Cost</span>
                 <span style={{fontWeight:700,fontSize:14,color:B.maroon}}>{fmt(pricing.rawCPP)}/pax</span>
@@ -1255,6 +1397,166 @@ const MenuTab = memo(function MenuTab({ recipes, allCosted, selIds, toggleSel, p
           </div>
         )}
       </div>
+    </div>
+  );
+});
+
+// ─── PACKAGES TAB ─────────────────────────────────────────────────────────────
+const PKG_TYPES = ["Breakfast","Lunch Buffet","Dinner Buffet","Cocktail","Conference","Custom"];
+
+const PackagesTab = memo(function PackagesTab({ packages, recipes, allCosted, onSave, onDelete, onLoad }) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ name:"", description:"", type:"Lunch Buffet", recipeIds:[], targetPP:"" });
+  const [search, setSearch] = useState("");
+
+  const recipeMap = useMemo(() => {
+    const m = {}; recipes.forEach(r => { m[r.id] = r; }); return m;
+  }, [recipes]);
+
+  const toggleRecipe = (id) => setForm(f => ({
+    ...f,
+    recipeIds: f.recipeIds.includes(id) ? f.recipeIds.filter(x=>x!==id) : [...f.recipeIds, id]
+  }));
+
+  const handleSave = () => {
+    if (!form.name.trim() || !form.recipeIds.length) return;
+    onSave({ name:form.name, description:form.description, type:form.type,
+      recipeIds:form.recipeIds, targetPP:form.targetPP?parseFloat(form.targetPP):null });
+    setForm({ name:"", description:"", type:"Lunch Buffet", recipeIds:[], targetPP:"" });
+    setShowForm(false);
+  };
+
+  // Compute cost for a package
+  const pkgCost = (recipeIds) => {
+    const ids = recipeIds || [];
+    return ids.reduce((s, id) => s + (allCosted[id]?.costPerPax||0), 0);
+  };
+
+  const filtered = useMemo(() => recipes.filter(r =>
+    r.name.toLowerCase().includes(search.toLowerCase())
+  ), [recipes, search]);
+
+  return (
+    <div style={{padding:"20px 24px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div>
+          <div style={{fontSize:17,fontWeight:700,color:"#3D1A00"}}>Menu Packages</div>
+          <div style={{fontSize:12,color:B.muted,marginTop:2}}>Pre-built menus for different occasions — load any package straight into the Menu Builder</div>
+        </div>
+        <BtnPrimary onClick={()=>setShowForm(s=>!s)}>+ New Package</BtnPrimary>
+      </div>
+
+      {showForm && (
+        <div style={{background:"white",borderRadius:12,border:`2px solid ${B.gold}`,padding:"18px 20px",marginBottom:20}}>
+          <div style={{fontSize:14,fontWeight:700,color:B.maroon,marginBottom:12}}>Build a Package</div>
+          <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr",gap:10,marginBottom:10}}>
+            <div><label style={LS}>Package Name *</label>
+              <input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. Executive Lunch Buffet" style={IS}/></div>
+            <div><label style={LS}>Type</label>
+              <select value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))} style={IS}>
+                {PKG_TYPES.map(t=><option key={t}>{t}</option>)}
+              </select></div>
+            <div><label style={LS}>Target Price/pax (UGX)</label>
+              <input type="number" value={form.targetPP} onChange={e=>setForm(f=>({...f,targetPP:e.target.value}))} placeholder="e.g. 35000" style={IS}/></div>
+          </div>
+          <div style={{marginBottom:10}}>
+            <label style={LS}>Description</label>
+            <textarea value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))}
+              placeholder="e.g. Our most popular corporate lunch package — 3 proteins, 2 starches, 2 salads and a sauce"
+              style={{...IS,height:56,resize:"vertical"}}/>
+          </div>
+          <div style={{fontSize:11,fontWeight:700,color:B.maroon,letterSpacing:1,textTransform:"uppercase",marginBottom:8}}>
+            Select Dishes ({form.recipeIds.length} selected)
+          </div>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search dishes..." style={{...IS,marginBottom:8}}/>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:6,maxHeight:260,overflowY:"auto",marginBottom:12}}>
+            {filtered.map(r => {
+              const sel = form.recipeIds.includes(r.id);
+              const cpp = allCosted[r.id]?.costPerPax||0;
+              return (
+                <div key={r.id} onClick={()=>toggleRecipe(r.id)}
+                  style={{display:"flex",alignItems:"center",gap:7,padding:"7px 10px",borderRadius:7,cursor:"pointer",
+                    background:sel?"#FFF5E6":B.white,border:`1.5px solid ${sel?B.gold:B.border}`}}>
+                  <div style={{width:14,height:14,borderRadius:3,border:`2px solid ${sel?B.gold:"#C8B09A"}`,
+                    background:sel?B.gold:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                    {sel&&<span style={{color:"white",fontSize:9}}>✓</span>}
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:12,fontWeight:sel?600:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.name}</div>
+                    <div style={{fontSize:10,color:B.muted}}>{r.category} · {fmt(cpp)}/pax</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {form.recipeIds.length > 0 && (
+            <div style={{background:"#FFF5E6",borderRadius:8,padding:"8px 12px",marginBottom:10,fontSize:12,color:B.mid}}>
+              Raw food cost: <strong>{fmt(pkgCost(form.recipeIds))}/pax</strong>
+              {form.targetPP && <span style={{marginLeft:12}}>
+                Target margin: <strong style={{color:pkgCost(form.recipeIds)<parseFloat(form.targetPP)?B.green:"#C0392B"}}>
+                  {fmt(parseFloat(form.targetPP) - pkgCost(form.recipeIds))}/pax
+                </strong>
+              </span>}
+            </div>
+          )}
+          <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+            <button onClick={()=>setShowForm(false)} style={{padding:"7px 16px",background:"transparent",border:`1.5px solid #C8B09A`,color:B.mid,borderRadius:7,cursor:"pointer",fontFamily:"inherit"}}>Cancel</button>
+            <BtnPrimary onClick={handleSave} style={{padding:"7px 20px"}}>Save Package</BtnPrimary>
+          </div>
+        </div>
+      )}
+
+      {packages.length===0 ? (
+        <div style={{background:"white",borderRadius:10,border:`2px dashed ${B.border}`,padding:"50px",textAlign:"center"}}>
+          <div style={{fontSize:32,marginBottom:8}}>📋</div>
+          <div style={{fontSize:14,fontWeight:600,color:B.mid}}>No packages yet</div>
+          <div style={{fontSize:12,color:B.muted,marginTop:4}}>Create your first package — a Breakfast, Lunch Buffet, or Cocktail menu — and load it instantly when quoting clients.</div>
+        </div>
+      ) : (
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:14}}>
+          {packages.map(pkg => {
+            const ids = pkg.recipe_ids||[];
+            const cost = pkgCost(ids);
+            const margin = pkg.target_pp ? pkg.target_pp - cost : null;
+            return (
+              <div key={pkg.id} style={{background:"white",borderRadius:12,border:`1.5px solid ${B.border}`,overflow:"hidden"}}>
+                <div style={{background:`linear-gradient(135deg,${B.maroon},#8B2222)`,padding:"12px 16px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <div>
+                      <div style={{fontSize:14,fontWeight:700,color:B.cream}}>{pkg.name}</div>
+                      <div style={{fontSize:10,color:B.gold,marginTop:2,letterSpacing:1}}>{pkg.type}</div>
+                    </div>
+                    <button onClick={()=>onDelete(pkg.id)} style={{background:"none",border:"none",color:"rgba(245,230,200,0.5)",cursor:"pointer",fontSize:14,padding:0}}>✕</button>
+                  </div>
+                </div>
+                <div style={{padding:"12px 16px"}}>
+                  {pkg.description && <div style={{fontSize:12,color:B.mid,marginBottom:10,fontStyle:"italic",lineHeight:1.5}}>{pkg.description}</div>}
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:10}}>
+                    {ids.slice(0,6).map(id => (
+                      <span key={id} style={{fontSize:10,padding:"2px 7px",background:"#FFF5E6",color:B.maroon,borderRadius:10,border:`1px solid ${B.gold}33`}}>
+                        {recipeMap[id]?.name||"?"}
+                      </span>
+                    ))}
+                    {ids.length>6 && <span style={{fontSize:10,color:B.muted}}>+{ids.length-6} more</span>}
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:8,borderTop:`1px solid ${B.border}`}}>
+                    <div>
+                      <div style={{fontSize:10,color:B.muted}}>Food cost/pax</div>
+                      <div style={{fontSize:15,fontWeight:700,color:B.maroon}}>{fmt(cost)}</div>
+                      {margin !== null && <div style={{fontSize:11,color:margin>=0?B.green:"#C0392B",fontWeight:600}}>
+                        {margin>=0?"↑":"↓"} {fmt(Math.abs(margin))} margin @ {fmt(pkg.target_pp)} target
+                      </div>}
+                    </div>
+                    <BtnPrimary onClick={()=>onLoad(pkg)} style={{padding:"7px 14px",fontSize:12}}>
+                      Load into Builder →
+                    </BtnPrimary>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 });
