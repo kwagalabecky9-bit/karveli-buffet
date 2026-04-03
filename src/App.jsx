@@ -304,6 +304,8 @@ function fmtQty(qty, qtyUnit) {
       ? `${(qty / 1000).toFixed(3).replace(/\.?0+$/, "")} ${ML_UNITS.some(x=>u===x)?"L":"kg"}`
       : `${Math.round(qty)}${u}`;
   }
+  if (u === "kilogram" || u === "kg") return `${qty % 1 === 0 ? qty : qty.toFixed(3).replace(/\.?0+$/,"")} kg`;
+  if (u === "liter" || u === "litre" || u === "l") return `${qty % 1 === 0 ? qty : qty.toFixed(3).replace(/\.?0+$/,"")} L`;
   return `${qty} ${qtyUnit||""}`.trim();
 }
 
@@ -829,14 +831,18 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
   const addLine = (item) => {
     // Guess a sensible default unit based on purchase unit
     const pu = (item.unit||"").toLowerCase();
-    let defaultUnit = "g";
-    if (pu.includes("ml") || pu.includes("litre") || pu.includes("liter")) defaultUnit = "ml";
-    else if (pu.includes("each") || pu.includes("piece") || pu.includes("tray") || pu.includes("bunch") || pu.includes("bundle")) defaultUnit = "Each";
+    let defaultUnit = "Kilogram";
+    if (pu.includes("ml") || pu.includes("litre") || pu.includes("liter")) defaultUnit = "Liter";
+    else if (pu.includes("each") || pu.includes("piece") || pu.includes("bunch") || pu.includes("bundle")) defaultUnit = "Each";
     else if (pu.includes("portion")) defaultUnit = "Portion";
-    else if (pu.includes("tin")) defaultUnit = "Tin 100g";
-    else if (pu.includes("packet")) defaultUnit = "Packet 500g";
+    else if (pu.includes("tray")) defaultUnit = "Tray 30pc";
+    else if (pu.includes("tin") && pu.includes("100")) defaultUnit = "Tin 100g";
+    else if (pu.includes("tin") && pu.includes("2kg")) defaultUnit = "Tin 2kg";
+    else if (pu.includes("packet") && pu.includes("500")) defaultUnit = "Packet 500g";
+    else if (pu.includes("packet") && pu.includes("400")) defaultUnit = "Packet 400g";
+    else if (pu.includes("packet") && pu.includes("1kg")) defaultUnit = "Packet 1Kg";
     else if (pu.includes("bottle")) defaultUnit = "Bottle 500ml";
-    setForm(f=>({...f,lines:[...f.lines,{item:item.name,qty:100,qtyUnit:defaultUnit,qtyMode:"AP",yieldPct:95}]}));
+    setForm(f=>({...f,lines:[...f.lines,{item:item.name,qty:1,qtyUnit:defaultUnit,qtyMode:"AP",yieldPct:95}]}));
     setIngSearch(""); setDropOpen(false);
   };
   const updateLine = (idx, field, val) => setForm(f=>({...f,lines:f.lines.map((l,i)=>i===idx?{...l,[field]:val}:l)}));
@@ -969,16 +975,24 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
                         <select value={line.qtyUnit||line.uom||"g"}
                           onChange={e=>updateLine(i,"qtyUnit",e.target.value)}
                           style={{padding:"3px 5px",border:`1px solid ${B.gold}`,borderRadius:5,fontSize:11,fontFamily:"inherit",background:"#FFFBF5"}}>
+                          <option value="Kilogram">Kilogram</option>
+                          <option value="Liter">Liter</option>
                           <option value="g">g</option>
                           <option value="ml">ml</option>
                           <option value="Each">Each</option>
                           <option value="Portion">Portion</option>
+                          <option value="Piece">Piece</option>
+                          <option value="Bunch">Bunch</option>
+                          <option value="Bundle">Bundle</option>
                           <option value="Tray 30pc">Tray 30pc</option>
                           <option value="Tin 100g">Tin 100g</option>
+                          <option value="Tin 2kg">Tin 2kg</option>
+                          <option value="Tin 20g">Tin 20g</option>
                           <option value="Packet 500g">Pkt 500g</option>
+                          <option value="Packet 400g">Pkt 400g</option>
                           <option value="Packet 1Kg">Pkt 1Kg</option>
                           <option value="Bottle 500ml">Btl 500ml</option>
-                          <option value="Kilogram">Kilogram</option>
+                          <option value="Bottle 340g">Btl 340g</option>
                         </select>
                       </td>
                       <td style={{padding:"5px 7px"}}>
