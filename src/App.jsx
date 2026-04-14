@@ -901,7 +901,7 @@ ${issueList.map((ing,i)=>`<tr>
 }
 
 // ─── ITEMS TAB ────────────────────────────────────────────────────────────────
-const ItemsTab = memo(function ItemsTab({ items, setItems, showToast }) {
+const ItemsTab = memo(function ItemsTab({ items, setItems, showToast, dbReady }) {
   const [search, setSearch]   = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [editItem, setEditItem] = useState(null);
