@@ -414,8 +414,13 @@ export default function KarveliApp() {
   const [recipes, setRecipes]       = useState(SEED_RECIPES);
   const [dbReady, setDbReady]       = useState(false);
   const [loading, setLoading]       = useState(true);
+  const [user, setUser]             = useState(null);     // logged-in user
+  const [authLoading, setAuthLoading] = useState(true);  // checking session
+  const [authEmail, setAuthEmail]   = useState("");
+  const [authSent, setAuthSent]     = useState(false);
+  const [authError, setAuthError]   = useState("");
   const [selIds, setSelIds]         = useState(new Set());
-  const [uptake, setUptake]         = useState({});  // recipeId → 0-100%
+  const [uptake, setUptake]         = useState({});
   const [pax, setPax]               = useState(50);
   const [fcPct, setFcPct]           = useState(35);
   const [vatPct, setVatPct]         = useState(18);
@@ -430,6 +435,48 @@ export default function KarveliApp() {
   const [issueNote, setIssueNote]   = useState("");
   const [modal, setModal]           = useState(null);
   const [toast, setToast]           = useState(null);
+  const [auditLog, setAuditLog]     = useState([]);
+
+  // ── Auth: listen for session changes ─────────────────────────────────────
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user || null);
+      setAuthLoading(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user || null);
+      setAuthLoading(false);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // ── Audit logger ──────────────────────────────────────────────────────────
+  const logAudit = useCallback(async (action, tableName, recordId, oldVal, newVal) => {
+    if (!user) return;
+    const entry = {
+      user_email: user.email,
+      user_name: user.user_metadata?.name || user.email.split("@")[0],
+      action,
+      table_name: tableName,
+      record_id: String(recordId||""),
+      old_value: oldVal ? JSON.stringify(oldVal) : null,
+      new_value: newVal ? JSON.stringify(newVal) : null,
+    };
+    await supabase.from("audit_log").insert(entry);
+    setAuditLog(prev => [{ ...entry, created_at: new Date().toISOString(), id: uid() }, ...prev.slice(0,99)]);
+  }, [user]);
+
+  // ── Send magic link ───────────────────────────────────────────────────────
+  const sendMagicLink = async () => {
+    setAuthError("");
+    if (!authEmail.trim() || !authEmail.includes("@")) { setAuthError("Please enter a valid email address"); return; }
+    const { error } = await supabase.auth.signInWithOtp({
+      email: authEmail.trim(),
+      options: { emailRedirectTo: "https://karveli-buffet.vercel.app" }
+    });
+    if (error) { setAuthError(error.message); return; }
+    setAuthSent(true);
+  };
 
   // ── Load all data from Supabase on mount ──────────────────────────────────
   useEffect(() => {
@@ -477,6 +524,11 @@ export default function KarveliApp() {
           .from("issue_records").select("*").order("issued_at", { ascending: false });
         if (recordErr) throw recordErr;
         if (recordRows?.length) setIssueRecs(recordRows.map(dbToRecord));
+
+        // Load recent audit log (last 100 entries)
+        const { data: auditRows } = await supabase
+          .from("audit_log").select("*").order("created_at", { ascending: false }).limit(100);
+        if (auditRows?.length) setAuditLog(auditRows);
 
         setDbReady(true);
       } catch(e) {
@@ -567,7 +619,8 @@ export default function KarveliApp() {
       setSavedMenus(prev => [{ id:uid(), ...payload, recipeIds:[...selIds], createdAt:new Date().toISOString() }, ...prev]);
     }
     setModal(null); showToast(`"${menuName}" saved!`);
-  }, [menuName,clientName,eventDate,branch,pax,fcPct,vatPct,customPP,selIds,dbReady,showToast]);
+    logAudit("Saved menu", "menus", menuName, null, { menuName, pax, branch, dishes: [...selIds].length });
+  }, [menuName,clientName,eventDate,branch,pax,fcPct,vatPct,customPP,selIds,dbReady,showToast,logAudit]);
 
   const deleteMenu = useCallback(async (id) => {
     if (dbReady) {
@@ -611,6 +664,7 @@ export default function KarveliApp() {
   const logIssue = useCallback(async () => {
     if (!selIds.size) { showToast("No dishes selected","err"); return; }
     const list = issueList.map(i=>({name:i.name,qtyUnit:i.qtyUnit,epQty:+fmtN(i.epQty,1),apQty:+fmtN(i.apQty,1),cost:Math.round(i.lineCost)}));
+    const userName = user?.user_metadata?.name || user?.email?.split("@")[0] || "Unknown";
     const payload = {
       menu_name: menuName||"Untitled", client_name: clientName,
       event_date: eventDate||null, branch, pax,
@@ -618,6 +672,7 @@ export default function KarveliApp() {
       total_expenditure: pricing.totalCostAll,
       selling_price: pricing.sellingIncVat,
       note: issueNote, issue_list: list,
+      issued_by: userName,
     };
     if (dbReady) {
       const { data, error } = await supabase.from("issue_records").insert(payload).select().single();
@@ -628,8 +683,10 @@ export default function KarveliApp() {
         eventDate:payload.event_date, totalExpenditure:payload.total_expenditure,
         sellingPrice:payload.selling_price, issueList:list, issuedAt:new Date().toISOString() }, ...prev]);
     }
-    setIssueNote(""); showToast("Issue logged!");
-  }, [selIds,menuName,clientName,eventDate,branch,pax,selRecipes,pricing,issueNote,issueList,dbReady,showToast]);
+    setIssueNote("");
+    showToast("Issue logged!");
+    logAudit("Logged issue sheet", "issue_records", menuName||"Untitled", null, { pax, branch, dishes: selRecipes.map(r=>r.name) });
+  }, [selIds,menuName,clientName,eventDate,branch,pax,selRecipes,pricing,issueNote,issueList,dbReady,showToast,logAudit,user]);
 
   const generateQuote = useCallback((mode) => {
     setModal(null);
@@ -746,6 +803,54 @@ ${!isClient ? `
     else showToast("Allow popups for this site to open quotes","err");
   }, [menuName,clientName,eventDate,branch,pax,selRecipes,allCosted,pricing,vatPct,issueList,showToast]);
 
+  // ── Show login screen if not authenticated ────────────────────────────────
+  if (authLoading) {
+    return (
+      <div style={{minHeight:"100vh",background:"#3D0E0E",display:"flex",alignItems:"center",justifyContent:"center"}}>
+        <div style={{color:"#F5E6C8",fontSize:14}}>Loading...</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div style={{minHeight:"100vh",background:`linear-gradient(135deg,#3D0E0E,#6B1A1A)`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"Georgia,serif"}}>
+        <div style={{background:"#FBF7F0",borderRadius:16,padding:"40px 44px",width:"100%",maxWidth:420,boxShadow:"0 20px 60px rgba(0,0,0,0.4)"}}>
+          <div style={{textAlign:"center",marginBottom:28}}>
+            <div style={{fontSize:32,marginBottom:8}}>🍽️</div>
+            <div style={{fontSize:20,fontWeight:700,color:"#6B1A1A",letterSpacing:1}}>KARVELI BUFFET SYSTEM</div>
+            <div style={{fontSize:11,color:"#8B6B4A",letterSpacing:3,textTransform:"uppercase",marginTop:4}}>Staff Access</div>
+          </div>
+          {!authSent ? (
+            <>
+              <div style={{fontSize:13,color:"#5C3A1E",marginBottom:16,textAlign:"center"}}>Enter your work email to receive a login link</div>
+              <label style={{fontSize:11,fontWeight:600,color:"#8B6B4A",textTransform:"uppercase",letterSpacing:1,display:"block",marginBottom:5}}>Email Address</label>
+              <input type="email" value={authEmail} onChange={e=>setAuthEmail(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&sendMagicLink()}
+                placeholder="e.g. emma@karvelifood.com"
+                style={{width:"100%",padding:"11px 14px",borderRadius:8,border:"1.5px solid #E8D9C0",fontSize:14,fontFamily:"inherit",marginBottom:10,outline:"none",boxSizing:"border-box"}}/>
+              {authError && <div style={{color:"#C0392B",fontSize:12,marginBottom:8}}>{authError}</div>}
+              <button onClick={sendMagicLink}
+                style={{width:"100%",padding:"12px",background:"#6B1A1A",color:"#F5E6C8",border:"none",borderRadius:8,fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
+                Send Login Link →
+              </button>
+              <div style={{fontSize:11,color:"#8B6B4A",textAlign:"center",marginTop:12}}>A secure link will be sent to your email. No password needed.</div>
+            </>
+          ) : (
+            <div style={{textAlign:"center"}}>
+              <div style={{fontSize:36,marginBottom:12}}>📧</div>
+              <div style={{fontSize:15,fontWeight:700,color:"#6B1A1A",marginBottom:8}}>Check your email!</div>
+              <div style={{fontSize:13,color:"#5C3A1E",lineHeight:1.6}}>We sent a login link to<br/><strong>{authEmail}</strong><br/><br/>Click the link in the email to sign in.</div>
+              <button onClick={()=>setAuthSent(false)} style={{marginTop:16,background:"none",border:"none",color:"#8B6B4A",cursor:"pointer",fontSize:12,fontFamily:"inherit",textDecoration:"underline"}}>Use a different email</button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const userName = user.user_metadata?.name || user.email.split("@")[0];
+
   return (
     <div style={{fontFamily:"'Georgia','Times New Roman',serif",minHeight:"100vh",background:B.bg,color:B.text}}>
       {/* Loading overlay */}
@@ -774,6 +879,8 @@ ${!isClient ? `
           </div>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             {dbReady && <span style={{fontSize:9,padding:"2px 7px",borderRadius:8,background:"rgba(74,124,89,0.3)",color:"#A8D5A2",letterSpacing:1}}>● LIVE</span>}
+            <span style={{fontSize:11,color:B.gold}}>👤 {userName}</span>
+            <button onClick={()=>supabase.auth.signOut()} style={{padding:"4px 10px",background:"rgba(255,255,255,0.1)",border:"1px solid rgba(245,230,200,0.3)",color:B.cream,borderRadius:6,cursor:"pointer",fontSize:10,fontFamily:"inherit"}}>Sign out</button>
             {tab==="menu" && selIds.size>0 && (
               <div style={{display:"flex",gap:7}}>
                 <button onClick={()=>setModal("save")} style={{padding:"6px 13px",background:"rgba(196,146,42,0.2)",border:`1px solid ${B.gold}`,color:B.cream,borderRadius:7,cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>💾 Save</button>
@@ -793,8 +900,8 @@ ${!isClient ? `
       </div>
 
       {/* Tab content */}
-      {tab==="items"    && <ItemsTab   items={items} setItems={setItems} showToast={showToast} dbReady={dbReady} />}
-      {tab==="recipes"  && <RecipesTab recipes={recipes} setRecipes={setRecipes} items={items} itemMap={itemMap} allCosted={allCosted} showToast={showToast} dbReady={dbReady} />}
+      {tab==="items"    && <ItemsTab   items={items} setItems={setItems} showToast={showToast} dbReady={dbReady} logAudit={logAudit} />}
+      {tab==="recipes"  && <RecipesTab recipes={recipes} setRecipes={setRecipes} items={items} itemMap={itemMap} allCosted={allCosted} showToast={showToast} dbReady={dbReady} logAudit={logAudit} />}
       {tab==="packages" && <PackagesTab packages={packages} recipes={recipes} allCosted={allCosted} onSave={savePackage} onDelete={deletePackage} onUpdate={updatePackage} onLoad={(pkg) => {
           setSelIds(new Set(pkg.recipe_ids||[]));
           setMenuName(pkg.name); setTab("menu");
@@ -865,7 +972,7 @@ ${issueList.map((ing,i)=>`<tr>
           if(w){w.document.write(html);w.document.close();}
           else showToast("Allow popups to print issue sheet","err");
         }} />}
-      {tab==="records" && <RecordsTab issueRecs={issueRecs} />}
+      {tab==="records" && <RecordsTab issueRecs={issueRecs} auditLog={auditLog} />}
 
       {/* Modals */}
       {modal==="save" && (
@@ -901,7 +1008,7 @@ ${issueList.map((ing,i)=>`<tr>
 }
 
 // ─── ITEMS TAB ────────────────────────────────────────────────────────────────
-const ItemsTab = memo(function ItemsTab({ items, setItems, showToast, dbReady }) {
+const ItemsTab = memo(function ItemsTab({ items, setItems, showToast, dbReady, logAudit }) {
   const [search, setSearch]   = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [editItem, setEditItem] = useState(null);
@@ -927,6 +1034,7 @@ const ItemsTab = memo(function ItemsTab({ items, setItems, showToast, dbReady })
       }
       setItems(prev=>prev.map(i=>i.id===editItem.id?{...i,name:form.name.trim(),unit:form.unit,price}:i));
       showToast(`"${form.name}" updated!`);
+      logAudit?.("Updated price", "items", form.name, { price: editItem.price }, { price });
     } else {
       let newId = uid();
       if (dbReady) {
@@ -936,6 +1044,7 @@ const ItemsTab = memo(function ItemsTab({ items, setItems, showToast, dbReady })
       }
       setItems(prev=>[...prev,{name:form.name.trim(),unit:form.unit,price,id:newId}]);
       showToast(`"${form.name}" added!`);
+      logAudit?.("Added item", "items", form.name, null, { name:form.name, unit:form.unit, price });
     }
     setShowAdd(false); setEditItem(null);
   };
@@ -994,7 +1103,7 @@ const ItemsTab = memo(function ItemsTab({ items, setItems, showToast, dbReady })
 });
 
 // ─── RECIPES TAB ─────────────────────────────────────────────────────────────
-const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMap, allCosted, showToast, dbReady }) {
+const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMap, allCosted, showToast, dbReady, logAudit }) {
   const [filterCat, setFilterCat] = useState("All");
   const [search, setSearch]       = useState("");
   const [showForm, setShowForm]   = useState(false);
@@ -1062,6 +1171,7 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
         await supabase.from("recipe_lines").insert(linePayload);
         setRecipes(prev => prev.map(r => r.id === editing.id ? { ...form, id: editing.id } : r));
         showToast(`"${form.name}" updated!`);
+        logAudit?.("Updated recipe", "recipes", form.name, null, { name:form.name, ingredients:form.lines.length });
       } else {
         // Insert new recipe
         const { data: newRecipe, error } = await supabase.from("recipes").insert(recipePayload).select().single();
@@ -1073,6 +1183,7 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
         await supabase.from("recipe_lines").insert(linePayload);
         setRecipes(prev => [...prev, { ...form, id: newRecipe.id }]);
         showToast(`"${form.name}" created!`);
+        logAudit?.("Created recipe", "recipes", form.name, null, { name:form.name, category:form.category });
       }
     } else {
       if (editing) { setRecipes(prev=>prev.map(r=>r.id===editing.id?form:r)); showToast(`"${form.name}" updated!`); }
@@ -1864,65 +1975,119 @@ const IssueTab = memo(function IssueTab({ selIds, selRecipes, allCosted, pax, is
 });
 
 // ─── RECORDS TAB ─────────────────────────────────────────────────────────────
-const RecordsTab = memo(function RecordsTab({ issueRecs }) {
+const RecordsTab = memo(function RecordsTab({ issueRecs, auditLog }) {
+  const [activeSection, setActiveSection] = useState("issues");
   return (
     <div style={{padding:"20px 24px"}}>
-      <div style={{fontSize:17,fontWeight:700,color:"#3D1A00",marginBottom:3}}>Issue Records</div>
-      <div style={{fontSize:12,color:B.muted,marginBottom:16}}>{issueRecs.length} records</div>
-      {issueRecs.length===0 ? (
-        <div style={{background:"white",borderRadius:10,border:`2px dashed ${B.border}`,padding:"50px",textAlign:"center"}}>
-          <div style={{fontSize:28,marginBottom:7}}>📜</div>
-          <div style={{fontSize:14,fontWeight:600,color:B.mid}}>No records yet</div>
-          <div style={{fontSize:12,color:B.muted,marginTop:3}}>Log an issue from the Issue Sheet to start your records.</div>
-        </div>
-      ) : (
-        <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          {issueRecs.map(r=>(
-            <div key={r.id} style={{background:"white",borderRadius:12,border:`1.5px solid ${B.border}`,overflow:"hidden"}}>
-              <div style={{background:`linear-gradient(90deg,${B.maroon},#8B2222)`,padding:"10px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div>
-                  <div style={{fontWeight:700,color:B.cream,fontSize:14}}>{r.menuName}</div>
-                  <div style={{fontSize:11,color:"rgba(245,230,200,0.7)",marginTop:1}}>{r.clientName&&`${r.clientName} · `}{r.branch&&`${r.branch} · `}{new Date(r.issuedAt).toLocaleString()} · {r.pax} guests</div>
+      <div style={{fontSize:17,fontWeight:700,color:"#3D1A00",marginBottom:12}}>Records & Audit Trail</div>
+      <div style={{display:"flex",gap:6,marginBottom:18}}>
+        {[{id:"issues",label:`📋 Issue Records (${issueRecs.length})`},{id:"audit",label:`🔍 Audit Trail (${auditLog.length})`}].map(s=>(
+          <button key={s.id} onClick={()=>setActiveSection(s.id)}
+            style={{padding:"7px 16px",borderRadius:20,border:"1.5px solid",cursor:"pointer",fontSize:12,fontWeight:600,fontFamily:"inherit",
+              background:activeSection===s.id?B.maroon:"transparent",borderColor:activeSection===s.id?B.maroon:B.gold,
+              color:activeSection===s.id?B.cream:B.maroon}}>
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {activeSection==="issues" && (
+        issueRecs.length===0 ? (
+          <div style={{background:"white",borderRadius:10,border:`2px dashed ${B.border}`,padding:"50px",textAlign:"center"}}>
+            <div style={{fontSize:28,marginBottom:7}}>📜</div>
+            <div style={{fontSize:14,fontWeight:600,color:B.mid}}>No records yet</div>
+            <div style={{fontSize:12,color:B.muted,marginTop:3}}>Log an issue from the Issue Sheet to start your records.</div>
+          </div>
+        ) : (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {issueRecs.map(r=>(
+              <div key={r.id} style={{background:"white",borderRadius:12,border:`1.5px solid ${B.border}`,overflow:"hidden"}}>
+                <div style={{background:`linear-gradient(90deg,${B.maroon},#8B2222)`,padding:"10px 16px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontWeight:700,color:B.cream,fontSize:14}}>{r.menuName}</div>
+                    <div style={{fontSize:11,color:"rgba(245,230,200,0.7)",marginTop:1}}>
+                      {r.clientName&&`${r.clientName} · `}{r.branch&&`${r.branch} · `}
+                      {new Date(r.issuedAt).toLocaleString()} · {r.pax} guests
+                      {r.issuedBy&&<span style={{color:B.gold}}> · {r.issuedBy}</span>}
+                    </div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:11,color:B.gold}}>Expenditure</div>
+                    <div style={{fontSize:17,fontWeight:700,color:B.gold}}>{fmt(r.totalExpenditure)}</div>
+                  </div>
                 </div>
-                <div style={{textAlign:"right"}}>
-                  <div style={{fontSize:11,color:B.gold}}>Expenditure</div>
-                  <div style={{fontSize:17,fontWeight:700,color:B.gold}}>{fmt(r.totalExpenditure)}</div>
+                <div style={{padding:"12px 16px"}}>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:7}}>
+                    {r.dishes.map(n=><span key={n} style={{fontSize:10,padding:"2px 7px",background:"#FFF5E6",color:B.maroon,borderRadius:10,border:`1px solid ${B.gold}33`}}>{n}</span>)}
+                  </div>
+                  {r.note&&<div style={{fontSize:12,color:B.mid,marginBottom:6,fontStyle:"italic"}}>📝 {r.note}</div>}
+                  <details style={{fontSize:12}}>
+                    <summary style={{cursor:"pointer",color:B.muted,fontWeight:600,marginBottom:4}}>View {r.issueList.length} ingredients issued</summary>
+                    <table style={{width:"100%",borderCollapse:"collapse",marginTop:6}}>
+                      <thead><tr style={{background:B.bg}}>
+                        {["Ingredient","Unit","EP (usable)","AP (issued)","Est. Cost"].map(h=>(
+                          <th key={h} style={{padding:"5px 7px",textAlign:"left",fontSize:9,color:B.muted,fontWeight:700}}>{h}</th>
+                        ))}
+                      </tr></thead>
+                      <tbody>
+                        {r.issueList.map((ing,i)=>(
+                          <tr key={i} style={{borderBottom:`1px solid ${B.border}33`}}>
+                            <td style={{padding:"4px 7px",color:"#3D1A00"}}>{ing.name}</td>
+                            <td style={{padding:"4px 7px",color:B.muted}}>{ing.qtyUnit||ing.uom}</td>
+                            <td style={{padding:"4px 7px",color:B.green,fontWeight:600}}>{fmtQty(ing.epQty||ing.qty, ing.qtyUnit||ing.uom||"")}</td>
+                            <td style={{padding:"4px 7px",fontWeight:700,color:"#8B5E3C"}}>{fmtQty(ing.apQty||ing.effQty, ing.qtyUnit||ing.uom||"")}</td>
+                            <td style={{padding:"4px 7px",color:B.maroon,fontWeight:600}}>{fmt(ing.cost)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </details>
+                  <div style={{display:"flex",justifyContent:"space-between",marginTop:8,paddingTop:6,borderTop:`1px solid ${B.border}`}}>
+                    <span style={{fontSize:12,color:B.muted}}>Selling price: <strong>{fmt(r.sellingPrice)}</strong></span>
+                    <span style={{fontSize:12,color:B.green,fontWeight:600}}>Margin: {fmt(r.sellingPrice-r.totalExpenditure)}</span>
+                  </div>
                 </div>
               </div>
-              <div style={{padding:"12px 16px"}}>
-                <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:7}}>
-                  {r.dishes.map(n=><span key={n} style={{fontSize:10,padding:"2px 7px",background:"#FFF5E6",color:B.maroon,borderRadius:10,border:`1px solid ${B.gold}33`}}>{n}</span>)}
-                </div>
-                {r.note&&<div style={{fontSize:12,color:B.mid,marginBottom:6,fontStyle:"italic"}}>📝 {r.note}</div>}
-                <details style={{fontSize:12}}>
-                  <summary style={{cursor:"pointer",color:B.muted,fontWeight:600,marginBottom:4}}>View {r.issueList.length} ingredients issued</summary>
-                  <table style={{width:"100%",borderCollapse:"collapse",marginTop:6}}>
-                    <thead><tr style={{background:B.bg}}>
-                      {["Ingredient","Unit","EP (usable)","AP (issued)","Est. Cost"].map(h=>(
-                        <th key={h} style={{padding:"5px 7px",textAlign:"left",fontSize:9,color:B.muted,fontWeight:700}}>{h}</th>
-                      ))}
-                    </tr></thead>
-                    <tbody>
-                      {r.issueList.map((ing,i)=>(
-                        <tr key={i} style={{borderBottom:`1px solid ${B.border}33`}}>
-                          <td style={{padding:"4px 7px",color:"#3D1A00"}}>{ing.name}</td>
-                          <td style={{padding:"4px 7px",color:B.muted}}>{ing.qtyUnit||ing.uom}</td>
-                          <td style={{padding:"4px 7px",color:B.green,fontWeight:600}}>{fmtQty(ing.epQty||ing.qty, ing.qtyUnit||ing.uom||"")}</td>
-                          <td style={{padding:"4px 7px",fontWeight:700,color:"#8B5E3C"}}>{fmtQty(ing.apQty||ing.effQty, ing.qtyUnit||ing.uom||"")}</td>
-                          <td style={{padding:"4px 7px",color:B.maroon,fontWeight:600}}>{fmt(ing.cost)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </details>
-                <div style={{display:"flex",justifyContent:"space-between",marginTop:8,paddingTop:6,borderTop:`1px solid ${B.border}`}}>
-                  <span style={{fontSize:12,color:B.muted}}>Selling price: <strong>{fmt(r.sellingPrice)}</strong></span>
-                  <span style={{fontSize:12,color:B.green,fontWeight:600}}>Margin: {fmt(r.sellingPrice-r.totalExpenditure)}</span>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )
+      )}
+
+      {activeSection==="audit" && (
+        auditLog.length===0 ? (
+          <div style={{background:"white",borderRadius:10,border:`2px dashed ${B.border}`,padding:"50px",textAlign:"center"}}>
+            <div style={{fontSize:28,marginBottom:7}}>🔍</div>
+            <div style={{fontSize:14,fontWeight:600,color:B.mid}}>No activity yet</div>
+            <div style={{fontSize:12,color:B.muted,marginTop:3}}>Changes made by your team will appear here.</div>
+          </div>
+        ) : (
+          <div style={{background:"white",borderRadius:12,border:`1.5px solid ${B.border}`,overflow:"hidden"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+              <thead>
+                <tr style={{background:B.maroon}}>
+                  {["When","Who","Action","Details"].map(h=>(
+                    <th key={h} style={{padding:"9px 12px",textAlign:"left",color:B.cream,fontSize:10,textTransform:"uppercase",letterSpacing:0.5}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {auditLog.map((entry,i)=>(
+                  <tr key={entry.id||i} style={{borderBottom:`1px solid ${B.border}`,background:i%2===0?"white":"#FBF7F0"}}>
+                    <td style={{padding:"8px 12px",color:B.muted,whiteSpace:"nowrap"}}>
+                      {new Date(entry.created_at).toLocaleString("en-UG",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})}
+                    </td>
+                    <td style={{padding:"8px 12px",fontWeight:600,color:B.maroon}}>{entry.user_name||entry.user_email}</td>
+                    <td style={{padding:"8px 12px",color:B.text}}>{entry.action}</td>
+                    <td style={{padding:"8px 12px",color:B.muted,fontSize:11}}>
+                      {entry.table_name && <span style={{background:"#FFF5E6",padding:"1px 6px",borderRadius:8,marginRight:6,color:B.mid}}>{entry.table_name}</span>}
+                      {entry.record_id && <span>{entry.record_id}</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
       )}
     </div>
   );
