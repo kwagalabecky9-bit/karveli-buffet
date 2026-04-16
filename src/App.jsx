@@ -1122,8 +1122,23 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
   const openEdit = (r) => { setForm(JSON.parse(JSON.stringify(r))); setEditing(r); setShowForm(true); window.scrollTo({top:0,behavior:"smooth"}); };
 
   const formCost = useMemo(() => {
-    if (!form) return { batchCost:0, costPerPax:0, lines:[] };
-    return costRecipe(form, itemMap);
+    if (!form) return { batchCost:0, costPerPax:0, lines:[], epTotalG:0, autoServingG:0 };
+    const costed = costRecipe(form, itemMap);
+    // Sum EP quantities — only for kg/g/L/ml units (weight/volume)
+    const WEIGHT_UNITS = ["kilogram","kg","g","gram","grams","liter","litre","l","ml","millilitre","milliliter"];
+    let epTotalG = 0;
+    costed.lines.forEach(line => {
+      const u = (line.qtyUnit||"").toLowerCase().trim();
+      const isWeight = WEIGHT_UNITS.some(x => u === x);
+      if (!isWeight) return;
+      const epQty = line.epQty || 0;
+      // Convert to grams
+      if (u === "kilogram" || u === "kg") epTotalG += epQty * 1000;
+      else if (u === "liter" || u === "litre" || u === "l") epTotalG += epQty * 1000;
+      else epTotalG += epQty; // already in g or ml
+    });
+    const autoServingG = form.basePax > 0 && epTotalG > 0 ? Math.round(epTotalG / form.basePax) : 0;
+    return { ...costed, epTotalG: Math.round(epTotalG), autoServingG };
   }, [form, itemMap]);
 
   const matchItems = useMemo(() =>
@@ -1156,7 +1171,7 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
     if (dbReady) {
       const recipePayload = {
         name: form.name.trim(), category: form.category,
-        base_pax: form.basePax, serving_g: form.servingG || null,
+        base_pax: form.basePax, serving_g: form.servingG || formCost.autoServingG || null,
         tags: form.tags || [],
       };
       if (editing) {
@@ -1236,7 +1251,19 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
             <div><label style={LS}>Name *</label><input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. Spicy Beef Stew" style={IS}/></div>
             <div><label style={LS}>Category</label><select value={form.category} onChange={e=>setForm(f=>({...f,category:e.target.value}))} style={IS}>{DISH_CATS.map(c=><option key={c}>{c}</option>)}</select></div>
             <div><label style={LS}>Base Portions</label><input type="number" value={form.basePax} onChange={e=>setForm(f=>({...f,basePax:parseInt(e.target.value)||10}))} style={{...IS,textAlign:"center",fontWeight:700}}/></div>
-            <div><label style={LS}>Serving Size (g/person)</label><input type="number" value={form.servingG||""} onChange={e=>setForm(f=>({...f,servingG:e.target.value?parseInt(e.target.value):null}))} placeholder="e.g. 300" style={{...IS,textAlign:"center",fontWeight:700}}/></div>
+            <div>
+              <label style={LS}>Serving Size (g/person)</label>
+              <input type="number"
+                value={form.servingG || formCost.autoServingG || ""}
+                onChange={e=>setForm(f=>({...f,servingG:e.target.value?parseInt(e.target.value):null}))}
+                placeholder={formCost.autoServingG ? `Auto: ${formCost.autoServingG}g` : "e.g. 300"}
+                style={{...IS,textAlign:"center",fontWeight:700,
+                  background: !form.servingG && formCost.autoServingG ? "#FFF5E6" : "white",
+                  borderColor: !form.servingG && formCost.autoServingG ? B.gold : undefined}}/>
+              {!form.servingG && formCost.autoServingG>0 && (
+                <div style={{fontSize:9,color:B.gold,marginTop:2,textAlign:"center"}}>Auto-calculated from EP</div>
+              )}
+            </div>
             <div><label style={LS}>Overall Yield %</label><input type="number" value={form.yieldPct} onChange={e=>setForm(f=>({...f,yieldPct:parseFloat(e.target.value)||100}))} style={{...IS,textAlign:"center",fontWeight:700}}/></div>
           </div>
           <div style={{marginBottom:11}}>
@@ -1347,11 +1374,26 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
             )}
           </div>
           {formCost.batchCost>0 && (
-            <div style={{background:"linear-gradient(135deg,#FFF5E6,#FDF0D8)",borderRadius:9,padding:"10px 13px",marginBottom:11,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span style={{fontSize:13,color:B.mid}}>Batch cost ({form.basePax} portions{form.servingG ? ` · ${form.servingG}g/person` : ""})</span>
-              <span style={{fontSize:18,fontWeight:700,color:B.maroon}}>UGX {Math.round(formCost.batchCost).toLocaleString()}
-                <span style={{fontSize:12,fontWeight:400,color:B.muted,marginLeft:8}}>= UGX {Math.round(formCost.costPerPax).toLocaleString()}/person</span>
-              </span>
+            <div style={{background:"linear-gradient(135deg,#FFF5E6,#FDF0D8)",borderRadius:9,padding:"10px 13px",marginBottom:11}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:formCost.epTotalG>0?6:0}}>
+                <span style={{fontSize:13,color:B.mid}}>Batch cost ({form.basePax} portions)</span>
+                <span style={{fontSize:18,fontWeight:700,color:B.maroon}}>UGX {Math.round(formCost.batchCost).toLocaleString()}
+                  <span style={{fontSize:12,fontWeight:400,color:B.muted,marginLeft:8}}>= UGX {Math.round(formCost.costPerPax).toLocaleString()}/person</span>
+                </span>
+              </div>
+              {formCost.epTotalG>0 && (
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:6,borderTop:`1px dotted ${B.border}`}}>
+                  <span style={{fontSize:12,color:B.mid}}>Total EP (edible weight for batch)</span>
+                  <span style={{fontSize:13,fontWeight:700,color:B.green}}>
+                    {formCost.epTotalG >= 1000
+                      ? `${(formCost.epTotalG/1000).toFixed(2)}kg`
+                      : `${formCost.epTotalG}g`}
+                    <span style={{fontSize:11,fontWeight:400,color:B.muted,marginLeft:8}}>
+                      = {formCost.autoServingG}g/person
+                    </span>
+                  </span>
+                </div>
+              )}
             </div>
           )}
           <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
