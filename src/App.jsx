@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, memo, useEffect } from "react";
+import { useState, useMemo, useCallback, memo, useEffect, useRef } from "react";
 import { supabase } from "./supabase";
 
 // ─── CONSTANTS (outside component, computed once) ─────────────────────────────
@@ -443,7 +443,9 @@ export default function KarveliApp() {
   const [clientName, setClientName] = useState("");
   const [eventDate, setEventDate]   = useState("");
   const [branch, setBranch]         = useState(BRANCHES[0]);
-  const [activeMenuId, setActiveMenuId] = useState(null); // ID of loaded saved menu
+  const [activeMenuId, setActiveMenuId] = useState(null);
+  const activeMenuIdRef = useRef(null);
+  useEffect(() => { activeMenuIdRef.current = activeMenuId; }, [activeMenuId]);
   const [savedMenus, setSavedMenus] = useState([]);
   const [packages, setPackages]     = useState([]);
   const [issueRecs, setIssueRecs]   = useState([]);
@@ -627,6 +629,7 @@ export default function KarveliApp() {
 
   const saveMenu = useCallback(async () => {
     if (!menuName.trim()) { showToast("Enter a menu name","err"); return; }
+    const currentMenuId = activeMenuIdRef.current; // use ref to get latest value
     const payload = {
       name: menuName, client_name: clientName, event_date: eventDate||null,
       branch, pax, fc_pct: fcPct, vat_pct: vatPct,
@@ -634,17 +637,15 @@ export default function KarveliApp() {
       recipe_ids: [...selIds],
     };
     if (dbReady) {
-      if (activeMenuId) {
-        // Update existing menu
-        const { error } = await supabase.from("menus").update(payload).eq("id", activeMenuId);
+      if (currentMenuId) {
+        const { error } = await supabase.from("menus").update(payload).eq("id", currentMenuId);
         if (error) { showToast("Update failed","err"); console.error(error); return; }
-        setSavedMenus(prev => prev.map(m => m.id === activeMenuId
-          ? { ...m, ...dbToMenu({ ...payload, id: activeMenuId, created_at: m.createdAt }) }
+        setSavedMenus(prev => prev.map(m => m.id === currentMenuId
+          ? { ...m, ...dbToMenu({ ...payload, id: currentMenuId, created_at: m.createdAt }) }
           : m));
         setModal(null); showToast(`"${menuName}" updated!`);
         logAudit("Updated menu", "menus", menuName, null, { menuName, pax, branch, dishes: [...selIds].length });
       } else {
-        // Save as new menu
         const { data, error } = await supabase.from("menus").insert(payload).select().single();
         if (error) { showToast("Save failed","err"); console.error(error); return; }
         setSavedMenus(prev => [dbToMenu(data), ...prev]);
@@ -656,7 +657,7 @@ export default function KarveliApp() {
       setSavedMenus(prev => [{ id:uid(), ...payload, recipeIds:[...selIds], createdAt:new Date().toISOString() }, ...prev]);
       setModal(null); showToast(`"${menuName}" saved!`);
     }
-  }, [menuName,clientName,eventDate,branch,pax,fcPct,vatPct,customPP,selIds,dbReady,showToast,logAudit,activeMenuId]);
+  }, [menuName,clientName,eventDate,branch,pax,fcPct,vatPct,customPP,selIds,dbReady,showToast,logAudit]);
 
   const deleteMenu = useCallback(async (id) => {
     if (dbReady) {
@@ -1035,7 +1036,7 @@ ${issueList.map((ing,i)=>`<tr>
             <div style={{display:"flex",gap:8}}>
               <BtnPrimary onClick={saveMenu} style={{flex:1}}>{activeMenuId ? "Update Menu" : "Save Menu"}</BtnPrimary>
               {activeMenuId && (
-                <button onClick={()=>{ setActiveMenuId(null); saveMenu(); }}
+                <button onClick={()=>{ activeMenuIdRef.current = null; setActiveMenuId(null); setTimeout(saveMenu, 0); }}
                   style={{padding:"8px 14px",background:"transparent",border:`1.5px solid ${B.gold}`,color:B.maroon,borderRadius:8,cursor:"pointer",fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap"}}>
                   + Save as New
                 </button>
