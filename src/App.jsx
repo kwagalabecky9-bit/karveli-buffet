@@ -286,8 +286,8 @@ const SEED_RECIPES = [
 // If qtyUnit is "ml", we divide by 1000 (assuming price is per litre/kg).
 // If qtyUnit is "pc" / "each" / "portion" / other, we treat qty as a whole-unit count.
 
-const GRAM_UNITS  = ["g","gram","grams"];
-const ML_UNITS    = ["ml","millilitre","millilitres","milliliter","milliliters"];
+const GRAM_UNITS  = ["g","gm","gram","grams"];
+const ML_UNITS    = ["ml","Ml","millilitre","millilitres","milliliter","milliliters"];
 const PIECE_UNITS = ["pc","pcs","piece","pieces","each","portion","portions","tray","tin","packet","bottle","box","bunch","bundle","bag","crate"];
 
 function qtyToUnitFraction(qty, qtyUnit) {
@@ -311,12 +311,26 @@ function fmtQty(qty, qtyUnit) {
 
 function costRecipe(recipe, itemMap) {
   if (!recipe?.lines) return { costPerPax:0, batchCost:0, lines:[] };
+
+  // Normalise a qty_unit to its purchase-unit equivalent for price lookup
+  function normUnit(u) {
+    const l = (u||"").toLowerCase().trim();
+    if (["ml","millilitre","millilitres","milliliter","milliliters"].some(x=>l===x)) return "Liter";
+    if (["g","gram","grams","gm"].some(x=>l===x)) return "Kilogram";
+    return u; // keep as-is
+  }
+
   const lines = recipe.lines.map(line => {
-    const price    = itemMap[line.item] || 0;
+    const qtyUnit = line.qtyUnit || line.uom || "";
+    const normalisedUnit = normUnit(qtyUnit);
+    // Look up by name+normalised unit first, then name+original unit, then name only
+    const price = itemMap[`${line.item}||${normalisedUnit}`]
+               ?? itemMap[`${line.item}||${qtyUnit}`]
+               ?? itemMap[line.item]
+               ?? 0;
     const yield_   = (line.yieldPct || 100) / 100;
-    const mode     = line.qtyMode || "AP"; // default AP for backward compat
+    const mode     = line.qtyMode || "AP";
     const qty      = line.qty || 0;
-    const qtyUnit  = line.qtyUnit || line.uom || "";
 
     // Quantities in actual purchase-unit fractions (for pricing)
     let apFraction, epFraction;
@@ -544,7 +558,13 @@ export default function KarveliApp() {
   // ── Item lookup map — O(1) price lookups ──
   const itemMap = useMemo(() => {
     const m = {};
-    items.forEach(i => { m[i.name] = i.price; });
+    items.forEach(i => {
+      // Store by name+unit for exact match
+      m[`${i.name}||${i.unit}`] = i.price;
+      // Also store by name alone — but only if not already set
+      // This lets recipes that don't specify a unit still get a price
+      if (!(i.name in m)) m[i.name] = i.price;
+    });
     return m;
   }, [items]);
 
