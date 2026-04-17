@@ -443,6 +443,7 @@ export default function KarveliApp() {
   const [clientName, setClientName] = useState("");
   const [eventDate, setEventDate]   = useState("");
   const [branch, setBranch]         = useState(BRANCHES[0]);
+  const [activeMenuId, setActiveMenuId] = useState(null); // ID of loaded saved menu
   const [savedMenus, setSavedMenus] = useState([]);
   const [packages, setPackages]     = useState([]);
   const [issueRecs, setIssueRecs]   = useState([]);
@@ -621,6 +622,7 @@ export default function KarveliApp() {
 
   const toggleSel = useCallback((id) => {
     setSelIds(prev => { const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; });
+    setActiveMenuId(null); // clear loaded menu tracking when user makes manual changes
   }, []);
 
   const saveMenu = useCallback(async () => {
@@ -632,15 +634,29 @@ export default function KarveliApp() {
       recipe_ids: [...selIds],
     };
     if (dbReady) {
-      const { data, error } = await supabase.from("menus").insert(payload).select().single();
-      if (error) { showToast("Save failed","err"); console.error(error); return; }
-      setSavedMenus(prev => [dbToMenu(data), ...prev]);
+      if (activeMenuId) {
+        // Update existing menu
+        const { error } = await supabase.from("menus").update(payload).eq("id", activeMenuId);
+        if (error) { showToast("Update failed","err"); console.error(error); return; }
+        setSavedMenus(prev => prev.map(m => m.id === activeMenuId
+          ? { ...m, ...dbToMenu({ ...payload, id: activeMenuId, created_at: m.createdAt }) }
+          : m));
+        setModal(null); showToast(`"${menuName}" updated!`);
+        logAudit("Updated menu", "menus", menuName, null, { menuName, pax, branch, dishes: [...selIds].length });
+      } else {
+        // Save as new menu
+        const { data, error } = await supabase.from("menus").insert(payload).select().single();
+        if (error) { showToast("Save failed","err"); console.error(error); return; }
+        setSavedMenus(prev => [dbToMenu(data), ...prev]);
+        setActiveMenuId(data.id);
+        setModal(null); showToast(`"${menuName}" saved!`);
+        logAudit("Saved menu", "menus", menuName, null, { menuName, pax, branch, dishes: [...selIds].length });
+      }
     } else {
       setSavedMenus(prev => [{ id:uid(), ...payload, recipeIds:[...selIds], createdAt:new Date().toISOString() }, ...prev]);
+      setModal(null); showToast(`"${menuName}" saved!`);
     }
-    setModal(null); showToast(`"${menuName}" saved!`);
-    logAudit("Saved menu", "menus", menuName, null, { menuName, pax, branch, dishes: [...selIds].length });
-  }, [menuName,clientName,eventDate,branch,pax,fcPct,vatPct,customPP,selIds,dbReady,showToast,logAudit]);
+  }, [menuName,clientName,eventDate,branch,pax,fcPct,vatPct,customPP,selIds,dbReady,showToast,logAudit,activeMenuId]);
 
   const deleteMenu = useCallback(async (id) => {
     if (dbReady) {
@@ -903,7 +919,7 @@ ${!isClient ? `
             <button onClick={()=>supabase.auth.signOut()} style={{padding:"4px 10px",background:"rgba(255,255,255,0.1)",border:"1px solid rgba(245,230,200,0.3)",color:B.cream,borderRadius:6,cursor:"pointer",fontSize:10,fontFamily:"inherit"}}>Sign out</button>
             {tab==="menu" && selIds.size>0 && (
               <div style={{display:"flex",gap:7}}>
-                <button onClick={()=>setModal("save")} style={{padding:"6px 13px",background:"rgba(196,146,42,0.2)",border:`1px solid ${B.gold}`,color:B.cream,borderRadius:7,cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>💾 Save</button>
+                <button onClick={()=>setModal("save")} style={{padding:"6px 13px",background:"rgba(196,146,42,0.2)",border:`1px solid ${B.gold}`,color:B.cream,borderRadius:7,cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>{activeMenuId ? "💾 Update" : "💾 Save"}</button>
                 <button onClick={()=>setModal("quote")} style={{padding:"6px 13px",background:B.gold,border:"none",color:B.dark,borderRadius:7,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>📄 Quote</button>
               </div>
             )}
@@ -934,8 +950,20 @@ ${!isClient ? `
           setPax(m.pax); setFcPct(m.fcPct); setVatPct(m.vatPct);
           setCustomPP(m.customPP||""); setMenuName(m.name);
           setClientName(m.clientName||""); setEventDate(m.eventDate||"");
-          setBranch(m.branch||BRANCHES[0]); setTab("menu");
+          setBranch(m.branch||BRANCHES[0]);
+          setActiveMenuId(m.id);
+          setTab("menu");
           showToast(`"${m.name}" loaded!`);
+        }} onIssue={(m)=>{
+          const ids = m.recipeIds || m.selectedIds || [];
+          setSelIds(new Set(ids));
+          setPax(m.pax); setFcPct(m.fcPct); setVatPct(m.vatPct);
+          setCustomPP(m.customPP||""); setMenuName(m.name);
+          setClientName(m.clientName||""); setEventDate(m.eventDate||"");
+          setBranch(m.branch||BRANCHES[0]);
+          setActiveMenuId(m.id);
+          setTab("issue");
+          showToast(`"${m.name}" sent to Issue Sheet!`);
         }} />}
       {tab==="issue"   && <IssueTab   selIds={selIds} selRecipes={selRecipes} allCosted={allCosted} pax={pax} issueList={issueList} pricing={pricing} clientName={clientName} eventDate={eventDate} issueNote={issueNote} setIssueNote={setIssueNote} onLog={logIssue} onPrint={()=>{
           const fmtUGX = (n) => "UGX " + Math.round(n||0).toLocaleString();
@@ -996,7 +1024,7 @@ ${issueList.map((ing,i)=>`<tr>
 
       {/* Modals */}
       {modal==="save" && (
-        <Modal title="Save Menu" onClose={()=>setModal(null)}>
+        <Modal title={activeMenuId ? "Update Menu" : "Save Menu"} onClose={()=>setModal(null)}>
           <div style={{display:"flex",flexDirection:"column",gap:10}}>
             <div><label style={LS}>Menu Name *</label><input value={menuName} onChange={e=>setMenuName(e.target.value)} placeholder="e.g. Easter Sunday Buffet 2026" style={IS}/></div>
             <div><label style={LS}>Client / Event</label><input value={clientName} onChange={e=>setClientName(e.target.value)} placeholder="e.g. Acacia Weddings" style={IS}/></div>
@@ -1004,7 +1032,15 @@ ${issueList.map((ing,i)=>`<tr>
             <div style={{background:"#FFF5E6",borderRadius:8,padding:"9px 13px",fontSize:12,color:B.mid}}>
               {selIds.size} dishes · {pax} guests · {branch} · Selling: {fmt(pricing.finalPP)}/pax
             </div>
-            <BtnPrimary onClick={saveMenu}>Save Menu</BtnPrimary>
+            <div style={{display:"flex",gap:8}}>
+              <BtnPrimary onClick={saveMenu} style={{flex:1}}>{activeMenuId ? "Update Menu" : "Save Menu"}</BtnPrimary>
+              {activeMenuId && (
+                <button onClick={()=>{ setActiveMenuId(null); saveMenu(); }}
+                  style={{padding:"8px 14px",background:"transparent",border:`1.5px solid ${B.gold}`,color:B.maroon,borderRadius:8,cursor:"pointer",fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap"}}>
+                  + Save as New
+                </button>
+              )}
+            </div>
           </div>
         </Modal>
       )}
@@ -1873,7 +1909,7 @@ const PackagesTab = memo(function PackagesTab({ packages, recipes, allCosted, on
 });
 
 // ─── SAVED TAB ────────────────────────────────────────────────────────────────
-const SavedTab = memo(function SavedTab({ savedMenus, onLoad, onDelete }) {
+const SavedTab = memo(function SavedTab({ savedMenus, onLoad, onDelete, onIssue }) {
   return (
     <div style={{padding:"20px 24px"}}>
       <div style={{fontSize:17,fontWeight:700,color:"#3D1A00",marginBottom:3}}>Saved Menus</div>
@@ -1902,7 +1938,13 @@ const SavedTab = memo(function SavedTab({ savedMenus, onLoad, onDelete }) {
                   <div style={{fontSize:10,color:B.muted}}>Guests</div>
                   <div style={{fontSize:16,fontWeight:700,color:B.maroon}}>{m.pax}<span style={{fontSize:10,fontWeight:400}}> people</span></div>
                 </div>
-                <BtnPrimary onClick={()=>onLoad(m)} style={{padding:"7px 14px",fontSize:12}}>Load →</BtnPrimary>
+                <div style={{display:"flex",gap:6}}>
+                  <button onClick={()=>onIssue(m)}
+                    style={{padding:"6px 11px",background:"transparent",border:`1px solid ${B.green}`,color:B.green,borderRadius:6,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600}}>
+                    🧾 Issue
+                  </button>
+                  <BtnPrimary onClick={()=>onLoad(m)} style={{padding:"6px 12px",fontSize:11}}>Edit →</BtnPrimary>
+                </div>
               </div>
             </div>
           ))}
