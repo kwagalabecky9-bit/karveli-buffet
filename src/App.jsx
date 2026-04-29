@@ -7,10 +7,10 @@ const fmtN = (n, dp=2) => (isNaN(n)||n==null) ? "0" : Number(n).toFixed(dp);
 const fmt = (n) => "UGX " + Math.round(n||0).toLocaleString();
 const uid = () => Math.random().toString(36).slice(2,9);
 const todayStr = () => new Date().toLocaleDateString("en-UG",{year:"numeric",month:"long",day:"numeric"});
-const DISH_CATS = ["Starches","Proteins","Sauces","Sides","Salads","Desserts","Breakfast","Eggs & Omelettes","Pastries & Breads","Beverages","Accompaniments","Other"];
+const DISH_CATS = ["Starches","Proteins","Sauces","Sides","Salads","Breakfast","Eggs & Omelettes","Pastries & Breads","Beverages","Accompaniments","Hot Kitchen","Hot Snacks","Cake Recipes","Other"];
 const DIET_TAGS = ["veg","vegan","gluten-free","dairy-free","contains-nuts","halal"];
 const BRANCHES  = ["Lumumba Avenue","Munyonyo","Bukoto To Go","Gaba Road","All Branches"];
-const TABS = [{id:"items",label:"📦 Prices"},{id:"recipes",label:"🧑‍🍳 Recipes"},{id:"packages",label:"📋 Packages"},{id:"menu",label:"🍽️ Menu Builder"},{id:"saved",label:"💾 Saved"},{id:"issue",label:"🧾 Issue Sheet"},{id:"records",label:"📜 Records"}];
+const TABS = [{id:"items",label:"📦 Prices"},{id:"recipes",label:"🧑‍🍳 Recipes"},{id:"cakes",label:"🎂 Cake Recipes"},{id:"packages",label:"📋 Packages"},{id:"menu",label:"🍽️ Menu Builder"},{id:"saved",label:"💾 Saved"},{id:"issue",label:"🧾 Issue Sheet"},{id:"records",label:"📜 Records"}];
 
 // ─── SEED DATA (computed once at module level) ────────────────────────────────
 const SEED_ITEMS = [
@@ -445,7 +445,12 @@ export default function KarveliApp() {
   const [branch, setBranch]         = useState(BRANCHES[0]);
   const [activeMenuId, setActiveMenuId] = useState(null);
   const activeMenuIdRef = useRef(null);
-  useEffect(() => { activeMenuIdRef.current = activeMenuId; }, [activeMenuId]);
+
+  // Always set ref directly alongside state
+  const setActiveMenu = useCallback((id) => {
+    activeMenuIdRef.current = id;
+    setActiveMenuId(id);
+  }, []);
   const [savedMenus, setSavedMenus] = useState([]);
   const [packages, setPackages]     = useState([]);
   const [issueRecs, setIssueRecs]   = useState([]);
@@ -624,7 +629,7 @@ export default function KarveliApp() {
 
   const toggleSel = useCallback((id) => {
     setSelIds(prev => { const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; });
-    setActiveMenuId(null); // clear loaded menu tracking when user makes manual changes
+    setActiveMenu(null); // clear loaded menu tracking when user makes manual changes
   }, []);
 
   const saveMenu = useCallback(async () => {
@@ -649,7 +654,7 @@ export default function KarveliApp() {
         const { data, error } = await supabase.from("menus").insert(payload).select().single();
         if (error) { showToast("Save failed","err"); console.error(error); return; }
         setSavedMenus(prev => [dbToMenu(data), ...prev]);
-        setActiveMenuId(data.id);
+        setActiveMenu(data.id);
         setModal(null); showToast(`"${menuName}" saved!`);
         logAudit("Saved menu", "menus", menuName, null, { menuName, pax, branch, dishes: [...selIds].length });
       }
@@ -939,6 +944,7 @@ ${!isClient ? `
       {/* Tab content */}
       {tab==="items"    && <ItemsTab   items={items} setItems={setItems} showToast={showToast} dbReady={dbReady} logAudit={logAudit} />}
       {tab==="recipes"  && <RecipesTab recipes={recipes} setRecipes={setRecipes} items={items} itemMap={itemMap} allCosted={allCosted} showToast={showToast} dbReady={dbReady} logAudit={logAudit} />}
+      {tab==="cakes"    && <RecipesTab recipes={recipes} setRecipes={setRecipes} items={items} itemMap={itemMap} allCosted={allCosted} showToast={showToast} dbReady={dbReady} logAudit={logAudit} defaultCategory="Cake Recipes" filterCategory="Cake Recipes" />}
       {tab==="packages" && <PackagesTab packages={packages} recipes={recipes} allCosted={allCosted} onSave={savePackage} onDelete={deletePackage} onUpdate={updatePackage} onLoad={(pkg) => {
           setSelIds(new Set(pkg.recipe_ids||[]));
           setMenuName(pkg.name); setTab("menu");
@@ -952,7 +958,7 @@ ${!isClient ? `
           setCustomPP(m.customPP||""); setMenuName(m.name);
           setClientName(m.clientName||""); setEventDate(m.eventDate||"");
           setBranch(m.branch||BRANCHES[0]);
-          setActiveMenuId(m.id);
+          setActiveMenu(m.id);
           setTab("menu");
           showToast(`"${m.name}" loaded!`);
         }} onIssue={(m)=>{
@@ -962,7 +968,7 @@ ${!isClient ? `
           setCustomPP(m.customPP||""); setMenuName(m.name);
           setClientName(m.clientName||""); setEventDate(m.eventDate||"");
           setBranch(m.branch||BRANCHES[0]);
-          setActiveMenuId(m.id);
+          setActiveMenu(m.id);
           setTab("issue");
           showToast(`"${m.name}" sent to Issue Sheet!`);
         }} />}
@@ -1036,7 +1042,7 @@ ${issueList.map((ing,i)=>`<tr>
             <div style={{display:"flex",gap:8}}>
               <BtnPrimary onClick={saveMenu} style={{flex:1}}>{activeMenuId ? "Update Menu" : "Save Menu"}</BtnPrimary>
               {activeMenuId && (
-                <button onClick={()=>{ activeMenuIdRef.current = null; setActiveMenuId(null); setTimeout(saveMenu, 0); }}
+                <button onClick={()=>{ activeMenuIdRef.current = null; setActiveMenu(null); setTimeout(saveMenu, 0); }}
                   style={{padding:"8px 14px",background:"transparent",border:`1.5px solid ${B.gold}`,color:B.maroon,borderRadius:8,cursor:"pointer",fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap"}}>
                   + Save as New
                 </button>
@@ -1160,8 +1166,8 @@ const ItemsTab = memo(function ItemsTab({ items, setItems, showToast, dbReady, l
 });
 
 // ─── RECIPES TAB ─────────────────────────────────────────────────────────────
-const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMap, allCosted, showToast, dbReady, logAudit }) {
-  const [filterCat, setFilterCat] = useState("All");
+const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMap, allCosted, showToast, dbReady, logAudit, filterCategory, defaultCategory }) {
+  const [filterCat, setFilterCat] = useState(filterCategory || "All");
   const [search, setSearch]       = useState("");
   const [showForm, setShowForm]   = useState(false);
   const [editing, setEditing]     = useState(null);
@@ -1171,11 +1177,16 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
   const [deleteId, setDeleteId]   = useState(null);
 
   const filtered = useMemo(() =>
-    recipes.filter(r=>(filterCat==="All"||r.category===filterCat)&&r.name.toLowerCase().includes(search.toLowerCase())),
-    [recipes, filterCat, search]
+    recipes.filter(r => {
+      const catMatch = filterCategory
+        ? r.category === filterCategory
+        : (filterCat === "All" || r.category === filterCat);
+      return catMatch && r.name.toLowerCase().includes(search.toLowerCase());
+    }),
+    [recipes, filterCat, search, filterCategory]
   );
 
-  const openNew  = () => { setForm({id:uid(),name:"",category:"Proteins",basePax:10,yieldPct:100,tags:[],lines:[]}); setEditing(null); setShowForm(true); window.scrollTo({top:0,behavior:"smooth"}); };
+  const openNew  = () => { setForm({id:uid(),name:"",category:defaultCategory||"Proteins",basePax:10,yieldPct:100,tags:[],lines:[]}); setEditing(null); setShowForm(true); window.scrollTo({top:0,behavior:"smooth"}); };
   const openEdit = (r) => { setForm(JSON.parse(JSON.stringify(r))); setEditing(r); setShowForm(true); window.scrollTo({top:0,behavior:"smooth"}); };
 
   const formCost = useMemo(() => {
@@ -1288,17 +1299,19 @@ const RecipesTab = memo(function RecipesTab({ recipes, setRecipes, items, itemMa
       )}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
         <div>
-          <div style={{fontSize:17,fontWeight:700,color:"#3D1A00"}}>Recipe Library</div>
-          <div style={{fontSize:12,color:B.muted,marginTop:2}}>{recipes.length} recipes · Costs pull live from item prices</div>
+          <div style={{fontSize:17,fontWeight:700,color:"#3D1A00"}}>{filterCategory ? `${filterCategory} Library` : "Recipe Library"}</div>
+          <div style={{fontSize:12,color:B.muted,marginTop:2}}>{filtered.length} recipes · Costs pull live from item prices</div>
         </div>
         <BtnPrimary onClick={openNew}>+ New Recipe</BtnPrimary>
       </div>
-      <div style={{display:"flex",gap:5,marginBottom:9,flexWrap:"wrap"}}>
-        {["All",...DISH_CATS].map(c=>(
-          <button key={c} onClick={()=>setFilterCat(c)} style={{padding:"4px 10px",borderRadius:20,border:"1.5px solid",cursor:"pointer",fontSize:11,fontWeight:600,fontFamily:"inherit",
-            background:filterCat===c?B.maroon:"transparent",borderColor:filterCat===c?B.maroon:B.gold,color:filterCat===c?B.cream:B.maroon}}>{c}</button>
-        ))}
-      </div>
+      {!filterCategory && (
+        <div style={{display:"flex",gap:5,marginBottom:9,flexWrap:"wrap"}}>
+          {["All",...DISH_CATS].map(c=>(
+            <button key={c} onClick={()=>setFilterCat(c)} style={{padding:"4px 10px",borderRadius:20,border:"1.5px solid",cursor:"pointer",fontSize:11,fontWeight:600,fontFamily:"inherit",
+              background:filterCat===c?B.maroon:"transparent",borderColor:filterCat===c?B.maroon:B.gold,color:filterCat===c?B.cream:B.maroon}}>{c}</button>
+          ))}
+        </div>
+      )}
       <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search recipes..." style={{...IS,marginBottom:12}}/>
 
       {showForm && form && (
